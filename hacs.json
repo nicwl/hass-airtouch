@@ -2,7 +2,5 @@
     "name": "Polyaire AirTouch",
     "homeassistant": "2023.8.0",
     "render_readme": true,
-    "zip_release": true,
-    "filename": "hass-airtouch.zip",
     "country": "AU"
 }
