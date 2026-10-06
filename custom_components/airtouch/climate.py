@@ -1,5 +1,6 @@
 """Polyaire AirTouch Climate Devices."""
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from typing import Any
@@ -23,6 +24,63 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Workaround for an AirTouch 5 console quirk (observed on console firmware 1.3.0):
+# a set-point command whose integer part equals the integer part of the current
+# set-point is silently dropped. 20.5 -> 20.0 does nothing, 20.5 -> 21.0 works.
+# Detour through a value that crosses an integer boundary first. The console needs
+# a moment to apply the detour before it accepts the real value; sent back-to-back,
+# the second command is lost.
+_SET_POINT_DETOUR_DELAY = 0.5
+
+
+class _SetPointDetour:
+    """Serialises set-point changes for one entity and applies the detour when needed.
+
+    Calls that arrive while an earlier one is mid-detour wait for it, and a call that
+    has been superseded by a newer one while waiting is dropped, so the last request
+    always wins. The integer-part check looks at both the console's reported set-point
+    and the last value sent, because the console's status push can lag a command by a
+    fraction of a second.
+    """
+
+    def __init__(self, target: pyairtouch.Zone) -> None:
+        self._target = target
+        self._lock = asyncio.Lock()
+        self._request = 0
+        self._last_sent: float | None = None
+
+    async def set(
+        self, temperature: float, min_temperature: float, max_temperature: float
+    ) -> None:
+        self._request += 1
+        request = self._request
+        async with self._lock:
+            if request != self._request:
+                _LOGGER.debug("Set-point %s superseded before it was sent", temperature)
+                return
+            await self._set(temperature, min_temperature, max_temperature)
+
+    async def _set(
+        self, temperature: float, min_temperature: float, max_temperature: float
+    ) -> None:
+        current = self._target.target_temperature
+        reference = [t for t in (current, self._last_sent) if t is not None]
+        if any(temperature != t and int(temperature) == int(t) for t in reference):
+            detour = temperature - 1.0
+            if detour < min_temperature:
+                detour = min(temperature + 1.0, max_temperature)
+            _LOGGER.debug(
+                "Set-point %s -> %s keeps the integer part; detouring via %s",
+                current,
+                temperature,
+                detour,
+            )
+            await self._target.set_target_temperature(detour)
+            self._last_sent = detour
+            await asyncio.sleep(_SET_POINT_DETOUR_DELAY)
+        await self._target.set_target_temperature(temperature)
+        self._last_sent = temperature
 
 
 async def async_setup_entry(
@@ -396,6 +454,7 @@ class ZoneClimateEntity(entities.AirTouchZoneEntity, climate.ClimateEntity):  # 
         self._attr_target_temperature_step = max(
             airtouch_zone.target_temperature_resolution, min_target_temperature_step
         )
+        self._set_point_detour = _SetPointDetour(airtouch_zone)
 
         # Only used when allow_zone_hvac_mode_changes is True
         self._attr_hvac_modes = [climate.HVACMode.OFF] + [
@@ -500,7 +559,11 @@ class ZoneClimateEntity(entities.AirTouchZoneEntity, climate.ClimateEntity):  # 
 
     async def async_set_temperature(self, **kwargs: Any) -> None:  # noqa: ANN401
         temperature: float = kwargs[climate.ATTR_TEMPERATURE]
-        await self._airtouch_zone.set_target_temperature(temperature)
+        await self._set_point_detour.set(
+            temperature,
+            self._airtouch_ac.min_target_temperature,
+            self._airtouch_ac.max_target_temperature,
+        )
 
         # The "climate.set_temperature" service also allows a HVAC Mode to be specified.
         if climate.ATTR_HVAC_MODE in kwargs:

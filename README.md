@@ -1,3 +1,8 @@
+> **Fork note (nicwl):** `main` here is upstream v1.11.0 plus one workaround: the AirTouch 5 console
+> (seen on firmware 1.3.0) silently drops a zone set-point command whose integer part matches the
+> current set-point, so 20.5 → 20.0 never applied. Zone climate entities now detour through an
+> integer-crossing value first. Everything else is unchanged. Upstream: TheNoctambulist/hass-airtouch.
+
 # Home Assistant - AirTouch
 
 [![GitHub Release][releases-shield]][releases]
